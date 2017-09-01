@@ -15,6 +15,8 @@
 
 * 接收：在实现接口中onEvent方法中返回。这里接收所有注册的事件，按你的需要进行分发。
 
+* 取消注册：unregister(ISubscriber subscriber, @NonNull Class[] events);
+
 ## 未来功能：粘性事件，生命周期管理,性能优化及内存泄露排查
 
 ## V0.1：测试版提交
