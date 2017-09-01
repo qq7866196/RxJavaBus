@@ -6,7 +6,7 @@
 * 利用rxjava达到线程切换目的。
 ## 使用方法：
 * 注册类需要实现接口：ISubscriber
-1、 注册一种数据接收：RxJavaBus.getDefault().register(this, EventTest.class);
+1. 注册一种数据接收：RxJavaBus.getDefault().register(this, EventTest.class);
 2、 注册多种数据接收： RxJavaBus.getDefault().register(this, new Class[]{EventTest.class, OtherTest.class});
 -> EventTest，OtherTest为你需要传递的事件类型
 -> 注意一个类只能注册一次，如果需要更改，需要先取消注册，然后再注册，方可生效。
