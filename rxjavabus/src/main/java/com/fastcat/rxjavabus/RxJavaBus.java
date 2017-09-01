@@ -229,6 +229,15 @@ public class RxJavaBus {
         subList.remove(subscriber);
         subscribersByEvent.put(event, subList);
     }
+    
+    public void unregister(ISubscriber subscriber, @NonNull Class[] events) {
+        if (subscriber == null) {
+            throw new RxJavaBusException("subscriber is null");
+        }
+        for(Class event:events){
+            unregister(subscriber,event);
+        }
+    }
 
     static class Builder {
 
