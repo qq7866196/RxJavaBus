@@ -1,7 +1,6 @@
 package com.fastcat.rxjavabus;
 
-import android.support.annotation.NonNull;
-
+import androidx.annotation.NonNull;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -15,13 +14,14 @@ import io.reactivex.Flowable;
 import io.reactivex.FlowableEmitter;
 import io.reactivex.FlowableOnSubscribe;
 import io.reactivex.Scheduler;
+import io.reactivex.android.schedulers.AndroidSchedulers;
 import io.reactivex.disposables.Disposable;
 import io.reactivex.functions.Consumer;
 import io.reactivex.schedulers.Schedulers;
 
 /**
  * Created by ws on 2017/8/31 0031.
- * 未来功能：粘性事件，生命周期管理,性能优化及内存泄露排查
+ *
  */
 
 public class RxJavaBus {
@@ -30,7 +30,8 @@ public class RxJavaBus {
      */
     public static String TAG = "RxJavaBus";
     private final ArrayList<Class> stickyEvents;
-    private final Map<Class, List<Subscription>> subscribersByEvent;
+    private final Map<Class, List<Subscription>> eventToSub;
+    private final Map<Subscription, List<Object>> subToEvent;
     static volatile RxJavaBus defaultInstance;
     private static final Builder DEFAULT_BUILDER = new Builder();
     private ArrayList<Disposable> disposables;
@@ -51,65 +52,76 @@ public class RxJavaBus {
     }
 
     RxJavaBus(Builder builder) {
-        subscribersByEvent = new ConcurrentHashMap<>();
+        eventToSub = new ConcurrentHashMap<>();
         stickyEvents = new ArrayList<>();
         disposables = new ArrayList<>();
+        subToEvent = new ConcurrentHashMap<>();
     }
-
 
     public void register(@NonNull ISubscriber subscriber, @NonNull Class event) {
         if (subscriber == null || event == null) {
             throw new RxJavaBusException("subscriber or event is null");
         }
-        //tagsByEvent.put(event, subscriber.getTags());
         synchronized (this) {
             subscribe(subscriber, event);
-        }
-     /*   //发送粘性事件
-        for (Object stickyEvent : stickyEvents) {
-            subscriber.onEvent(stickyEvent,"");
-            ArrayList<ISubscriber> arrayList = (ArrayList) subscribersByEvent.get(stickyEvent);
-            if (arrayList == null) {
-                subscribersByEvent.put(event.getClass(), new ArrayList<ISubscriber>());
-            } else {
-                Iterator iterator = arrayList.iterator();
-                while (iterator.hasNext()) {
-                    ISubscriber sub = (ISubscriber) iterator.next();
-                    sub.onEvent(event, "");
-                    //unregister(sub, event.getClass());
+            //发送粘性事件
+            for (Object stickyEvent : stickyEvents) {
+                ArrayList<Subscription> arrayList = (ArrayList) eventToSub.get(stickyEvent);
+                if (arrayList != null) {
+                    for (Subscription subscription : arrayList) {
+                        if (subscription.subscriber.equals(subscriber)) {
+                            subscriber.onEvent(stickyEvent, "");
+                        }
+                    }
                 }
             }
-        }*/
+        }
+
+
     }
 
-    public void register(@NonNull ISubscriber subscriber, @NonNull Class[] events) {
+    public void register(@NonNull ISubscriber subscriber, @NonNull Class... events) {
         if (subscriber == null || events == null) {
             throw new RxJavaBusException("subscriber or events is null");
         }
         synchronized (this) {
             for (Class event : events) {
-                subscribe(subscriber, event);
+                register(subscriber, event);
             }
         }
     }
 
-    private void subscribe(ISubscriber subscriber, Class event) {
-        ArrayList subList;
-        Subscription subscription = new Subscription(subscriber);
-        if (subscribersByEvent.get(event) == null) {
-            subList = new ArrayList();
-            subList.add(subscription);
-        } else {
-            subList = (ArrayList) subscribersByEvent.get(event);
-            if (subList.contains(subscription)) {
-                return;
-                /*throw new RxJavaBusException("Subscriber " + subscriber.getClass() + " already registered to event "
-                        + event.getClass());*/
-            } else {
-                subList.add(subscription);
-            }
+    private void subscribe(ISubscriber sub, Class event) {
+        if (sub == null || event == null) {
+            return;
         }
-        subscribersByEvent.put(event, subList);
+
+        ArrayList subList, eventList;
+        Subscription subscription = new Subscription(sub);
+
+        if (eventToSub.get(event) == null) {
+            subList = new ArrayList();
+        } else {
+            subList = (ArrayList) eventToSub.get(event);
+        }
+
+        if (subToEvent.get(subscription) == null) {
+            eventList = new ArrayList();
+        } else {
+            eventList = (ArrayList) subToEvent.get(subscription);
+        }
+
+        if (!subList.contains(subscription)) {
+            subList.add(subscription);
+        }
+
+        if (!eventList.contains(event)) {
+            //TODO 这个判断不严谨
+            eventList.add(event);
+        }
+
+        eventToSub.put(event, subList);
+        subToEvent.put(subscription, eventList);
     }
 
     public void post(Object event) {
@@ -117,86 +129,53 @@ public class RxJavaBus {
     }
 
     //指定接收线程
-    public void post(Object event, Scheduler receive) {
-        post(event,null, receive);
+    public void post(Object event, Scheduler receive, String tag) {
+        post(event, null, receive, tag);
     }
 
     //指定发送和接收线程
-    public void post(final Object event, Scheduler send, Scheduler receive) {
+    public void post(final Object event, Scheduler send, Scheduler receive, final String tag) {
         if (event == null) {
             throw new RxJavaBusException("params is null");
         }
+        if (send == null) {
+            send = Schedulers.computation();
+        }
+        if (receive == null) {
+            receive = AndroidSchedulers.mainThread();
+        }
         //不使用链式，就切换线程无效？
-        Disposable disposable =   Flowable.create(new FlowableOnSubscribe<Object>() {
+        Disposable disposable = Flowable.create(new FlowableOnSubscribe<Object>() {
             @Override
             public void subscribe(FlowableEmitter<Object> e) throws Exception {
-                //根据线程设置，在该线程中完成以下操作,这里设置的是新的IO线程
-                //数据库查询操作等
                 e.onNext(event);
                 e.onComplete();
             }
         }, BackpressureStrategy.BUFFER)
-                .subscribeOn(Schedulers.computation())
+                .subscribeOn(send)
                 .observeOn(receive)
                 .subscribe(new Consumer<Object>() {
                     @Override
                     public void accept(Object o) throws Exception {
-                        //根据线程设置，在该线程中完成以下操作,这里设置的是UI线程
-                        List<Subscription> arrayList = Collections.synchronizedList(subscribersByEvent.get(o.getClass()));
-                        if (arrayList == null) {
-                            subscribersByEvent.put(o.getClass(), new ArrayList<Subscription>());
-                        } else {
-                            Iterator iterator = arrayList.iterator();
-                            while (iterator.hasNext()) {
-                                Subscription sub = (Subscription) iterator.next();
-                                sub.subscriber.onEvent(o, "");
-                            }
+                        if (eventToSub.get(o.getClass()) == null) {
+                            return;
+                        }
+                        //根据线程设置，在该线程中完成以下操作,默认会在UI线程
+                        List<Subscription> arrayList = Collections.synchronizedList(eventToSub.get(o.getClass()));
+
+                        for (Subscription sub : arrayList) {
+                            sub.subscriber.onEvent(o, tag);
                         }
                     }
                 });
         disposables.add(disposable);
-   /*
-    //无效
-   Flowable flowable = Flowable.create(new FlowableOnSubscribe<Object>() {
-            @Override
-            public void subscribe(FlowableEmitter<Object> e) throws Exception {
-                //根据线程设置，在该线程中完成以下操作,这里设置的是新的IO线程
-                //数据库查询操作等
-                e.onNext(event);
-                e.onComplete();
-            }
-        }, BackpressureStrategy.BUFFER);
-        if (send != null) {
-            flowable.subscribeOn(send);
-        }
-        if (receive != null) {
-            flowable.observeOn(receive);
-        }
-        Disposable disposable = flowable.subscribe(new Consumer<Object>() {
-            @Override
-            public void accept(Object o) throws Exception {
-                //根据线程设置，在该线程中完成以下操作,这里设置的是UI线程
-                List<Subscription> arrayList = Collections.synchronizedList(subscribersByEvent.get(o.getClass()));
-                if (arrayList == null) {
-                    subscribersByEvent.put(o.getClass(), new ArrayList<Subscription>());
-                } else {
-                    Iterator iterator = arrayList.iterator();
-                    while (iterator.hasNext()) {
-                        Subscription sub = (Subscription) iterator.next();
-                        sub.subscriber.onEvent(o, "");
-                    }
-                }
-            }
-        });
-        disposables.add(disposable);*/
-
     }
 
     public void post(Object event, String action) {
         if (event == null) {
             throw new RxJavaBusException("event is null");
         }
-        ArrayList<Subscription> arrayList = (ArrayList) subscribersByEvent.get(event.getClass());
+        ArrayList<Subscription> arrayList = (ArrayList) eventToSub.get(event.getClass());
         if (arrayList != null) {
             Iterator iterator = arrayList.iterator();
             while (iterator.hasNext()) {
@@ -216,26 +195,23 @@ public class RxJavaBus {
         post(event);
     }
 
-    public void unregister(ISubscriber subscriber, @NonNull Class event) {
+    public void unregister(ISubscriber subscriber) {
         if (subscriber == null) {
             throw new RxJavaBusException("subscriber is null");
         }
-        ArrayList subList;
-        if (subscribersByEvent.get(event) == null) {
-            return;
-        } else {
-            subList = (ArrayList) subscribersByEvent.get(event);
-        }
-        subList.remove(subscriber);
-        subscribersByEvent.put(event, subList);
-    }
-    
-    public void unregister(ISubscriber subscriber, @NonNull Class[] events) {
-        if (subscriber == null) {
-            throw new RxJavaBusException("subscriber is null");
-        }
-        for(Class event:events){
-            unregister(subscriber,event);
+        if (subToEvent.get(subscriber) != null) {
+            ArrayList<Class> eventList = (ArrayList) subToEvent.get(subscriber);
+            ArrayList subList;
+            for (Class event : eventList) {
+                if (eventToSub.get(event) == null) {
+                    return;
+                } else {
+                    subList = (ArrayList) eventToSub.get(event);
+                    subList.remove(subscriber);
+                    eventToSub.put(event, subList);
+                }
+            }
+            subToEvent.remove(subscriber);
         }
     }
 
@@ -262,9 +238,9 @@ public class RxJavaBus {
         }
     }
 
-    public void cancelAllPost(){
-        if(disposables!=null){
-            for(Disposable disposable:disposables){
+    public void cancelAllPost() {
+        if (disposables != null) {
+            for (Disposable disposable : disposables) {
                 disposable.dispose();
             }
         }
@@ -274,11 +250,11 @@ public class RxJavaBus {
         if (stickyEvents != null) {
             stickyEvents.clear();
         }
-        if (subscribersByEvent != null) {
-            subscribersByEvent.clear();
+        if (eventToSub != null) {
+            eventToSub.clear();
         }
-        if(disposables!=null){
-            for(Disposable disposable:disposables){
+        if (disposables != null) {
+            for (Disposable disposable : disposables) {
                 disposable.dispose();
             }
         }
